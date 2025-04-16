@@ -36,13 +36,73 @@ func (a *CustomTrackingAccumulator) AddTrackingMetricGroup(group []telegraf.Metr
 		topic,ok := m.GetTag("topic")
 		if ok {
 			s := strings.Split(topic, "/")
-			if len(s) > 1 {
-				m.SetName(s[1])
+			len_s := len(s)
+
+			if len_s > 0 {
+				m.AddTag("organization", s[0])
+
+				if len_s > 1 {
+					product := s[1]
+
+					version := ""
+					product_version := product
+					if len_s > 4 {
+						version = s[3]
+						product_version = product + "_" + version
+					}
+					
+					m.SetName(product_version)
+
+					m.AddTag("product", product)
+					m.AddTag("version", version)
+					//m.AddTag("topic", strings.Join(s, "/"))
+
+					if len_s > 2 {
+						m.AddTag("serialnumber", s[2])
+
+						m.AddTag("domain", s[len_s-1])
+
+						if len_s > 4 {
+							m.AddTag("root", strings.Join(s[:len_s-2], "/"))
+						} else if len_s > 3 {
+							m.AddTag("root", strings.Join(s[:len_s-1], "/"))
+						}
+					}
+				}
 			}
-			if len(s) > 0 {
-				m.AddTag("root", strings.Join(s[:len(s)-1], "/"))
-				m.AddTag("domain", s[len(s)-1])
-			}
+
+			/*if len_s > 0 {
+				m.AddTag("organization", s[0])
+
+				if len_s > 1 {
+					product := s[1]
+
+					m.SetName(product)
+
+					// extract postfix
+					version := "1"
+					parts := strings.Split(product, "_v")
+					parts_len := len(parts)
+					if parts_len > 1 {
+						product = strings.Join(parts[:parts_len-1], "_v")
+						version = parts[parts_len-1]
+					}
+
+					m.AddTag("product", product)
+					m.AddTag("version", version)
+					s[1] = product
+					m.AddTag("topic", strings.Join(s, "/"))
+
+					if len_s > 2 {
+						m.AddTag("serialnumber", s[2])
+						m.AddTag("root", strings.Join(s[:len_s-1], "/"))
+
+						if len_s > 3 {
+							m.AddTag("domain", s[len_s-1])
+						}
+					}
+				}
+			}*/
 		}
 	}
 
