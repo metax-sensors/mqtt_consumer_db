@@ -10,7 +10,6 @@ import (
 	"os"
 	"sync"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/influxdata/telegraf/plugins/inputs/mqtt_consumer"
 	"github.com/influxdata/telegraf/plugins/parsers/json_v2"
 
@@ -27,27 +26,27 @@ var sampleConfig string
 var once sync.Once
 
 type MQTTConsumerDB struct {
-	Server				string               			`toml:"db_server"`
-	Database			string               			`toml:"db_name"`
-	Username			config.Secret        			`toml:"db_username"`
-	Password			config.Secret        			`toml:"db_password"`
-	Mqtt_Consumer		*mqtt_consumer.MQTTConsumer		`toml:"mqtt_consumer"`
-	Parser 	  			*json_v2.Parser 				`toml:"json_v2"`
-	ServerID			string               			`toml:"server_id"`
-	Debug				bool							`toml:"debug"`
-	Log 				telegraf.Logger 				`toml:"-"`
+	Server        string                      `toml:"db_server"`
+	Database      string                      `toml:"db_name"`
+	Username      config.Secret               `toml:"db_username"`
+	Password      config.Secret               `toml:"db_password"`
+	Mqtt_Consumer *mqtt_consumer.MQTTConsumer `toml:"mqtt_consumer"`
+	Parser        *json_v2.Parser             `toml:"json_v2"`
+	ServerID      string                      `toml:"server_id"`
+	Debug         bool                        `toml:"debug"`
+	Log           telegraf.Logger             `toml:"-"`
 
-	parser        		telegraf.Parser
-	acc 		 		telegraf.Accumulator
+	parser telegraf.Parser
+	acc    telegraf.Accumulator
 }
 
 var (
-	wg 					sync.WaitGroup
-	db_connection 		*pgxpool.Conn
-	db_pool 			*pgxpool.Pool
-	instance 			*MQTTConsumerDB
-	ctx 				context.Context
-	cancel 				context.CancelFunc
+	wg            sync.WaitGroup
+	db_connection *pgxpool.Conn
+	db_pool       *pgxpool.Pool
+	instance      *MQTTConsumerDB
+	ctx           context.Context
+	cancel        context.CancelFunc
 )
 
 /*const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -61,17 +60,17 @@ func RandStringBytes(n int) string {
 }*/
 
 type subscribe_structure struct {
-    Topic   string      `json:"pattern"`
+	Topic string `json:"pattern"`
 }
 
 func debug_log(formatted_text string, args ...any) {
 	if instance.Debug {
-		fmt.Fprintf(os.Stderr, fmt.Sprintf(formatted_text + "\n", args...))
+		fmt.Fprintf(os.Stderr, fmt.Sprintf(formatted_text+"\n", args...))
 	}
 }
 
 // create_topics retrieves the subscribe ACL (Access Control List) for a given client ID from the database
-// and returns a list of topics that the client is allowed to subscribe to or an error if the database query 
+// and returns a list of topics that the client is allowed to subscribe to or an error if the database query
 // or unmarshaling fails.
 func create_topics(client_id string) ([]string, error) {
 	query := fmt.Sprintf("SELECT subscribe_acl FROM vmq_auth_acl WHERE client_id='%s';", client_id)
@@ -89,7 +88,7 @@ func create_topics(client_id string) ([]string, error) {
 	for _, topic := range topics {
 		result = append(result, topic.Topic)
 	}
-	
+
 	debug_log("Topics: %v", result)
 
 	return result, nil
@@ -99,17 +98,17 @@ func create_topics(client_id string) ([]string, error) {
 // for the MQTT consumer when a notification is received.
 func listen() {
 	defer wg.Done()
-	
+
 	ctx, cancel = context.WithCancel(context.Background())
 
 	// Listen to the channel with its own connection
-	conn,err := db_pool.Acquire(context.Background())
+	conn, err := db_pool.Acquire(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error acquiring connection: %w\n", err)
 		os.Exit(1)
 	}
 
-	_,err = conn.Exec(context.Background(), "LISTEN mqtt_topics_changed;")
+	_, err = conn.Exec(context.Background(), "LISTEN mqtt_topics_changed;")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error listening to channel: %w\n", err)
 		os.Exit(1)
@@ -118,7 +117,7 @@ func listen() {
 	defer conn.Release()
 
 	for {
-		notify,err := conn.Conn().WaitForNotification(ctx)
+		notify, err := conn.Conn().WaitForNotification(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		}
@@ -138,7 +137,6 @@ func listen() {
 			}
 		}
 
-		
 		select {
 		case <-ctx.Done():
 			debug_log("context done. Close Listener.")
@@ -186,7 +184,7 @@ func (m *MQTTConsumerDB) Init() error {
 
 	// Create database connection pool
 	url := fmt.Sprintf("postgresql://%s:%s@%s/%s", username, password, m.Server, m.Database)
-	conn,err := pgxpool.New(context.Background(), url)
+	conn, err := pgxpool.New(context.Background(), url)
 	if err != nil {
 		return fmt.Errorf("Unable to connect to database: %w", err)
 	}
@@ -194,7 +192,7 @@ func (m *MQTTConsumerDB) Init() error {
 
 	// recreate instances
 	if m.Mqtt_Consumer == nil {
-		m.Mqtt_Consumer = mqtt_consumer.New(func(o *mqtt.ClientOptions) mqtt_consumer.Client { return mqtt.NewClient(o) })
+		m.Mqtt_Consumer = &mqtt_consumer.MQTTConsumer{}
 		m.Parser = &json_v2.Parser{}
 	}
 
@@ -221,11 +219,11 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) error {
 		return errors.New("parser not set")
 	}
 	m.Mqtt_Consumer.SetParser(m.parser) // set the parser in the mqtt_consumer plugin
-										// important, because the mqtt_consumer plugin
-										// won't work without a parser
-	
+	// important, because the mqtt_consumer plugin
+	// won't work without a parser
+
 	// Acquire a connection from the pool to create the topics
-	pool_conn,err := db_pool.Acquire(context.Background())
+	pool_conn, err := db_pool.Acquire(context.Background())
 	if err != nil {
 		return fmt.Errorf("Unable to acquire connection: %w", err)
 	}
@@ -265,8 +263,8 @@ func (m *MQTTConsumerDB) Gather(acc telegraf.Accumulator) error {
 
 func New() *MQTTConsumerDB {
 	return &MQTTConsumerDB{
-		Mqtt_Consumer: mqtt_consumer.New(func(o *mqtt.ClientOptions) mqtt_consumer.Client { return mqtt.NewClient(o) }),
-		Parser: &json_v2.Parser{},
+		Mqtt_Consumer: &mqtt_consumer.MQTTConsumer{},
+		Parser:        &json_v2.Parser{},
 	}
 }
 
