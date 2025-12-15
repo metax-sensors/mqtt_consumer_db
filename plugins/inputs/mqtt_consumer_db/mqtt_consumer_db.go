@@ -23,8 +23,6 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
-var once sync.Once
-
 type MQTTConsumerDB struct {
 	Server        string                      `toml:"db_server"`
 	Database      string                      `toml:"db_name"`
@@ -65,7 +63,7 @@ type subscribe_structure struct {
 
 func debug_log(formatted_text string, args ...any) {
 	if instance.Debug {
-		fmt.Fprintf(os.Stderr, fmt.Sprintf(formatted_text+"\n", args...))
+		fmt.Fprintf(os.Stderr, "%s", fmt.Sprintf(formatted_text+"\n", args...))
 	}
 }
 
@@ -104,13 +102,13 @@ func listen() {
 	// Listen to the channel with its own connection
 	conn, err := db_pool.Acquire(context.Background())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error acquiring connection: %w\n", err)
+		fmt.Fprintf(os.Stderr, "Error acquiring connection: %v\n", err)
 		os.Exit(1)
 	}
 
 	_, err = conn.Exec(context.Background(), "LISTEN mqtt_topics_changed;")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listening to channel: %w\n", err)
+		fmt.Fprintf(os.Stderr, "Error listening to channel: %v\n", err)
 		os.Exit(1)
 	}
 
