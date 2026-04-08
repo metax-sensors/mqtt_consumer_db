@@ -300,7 +300,7 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) (startErr error) {
 	}
 
 	m.acc = &CustomAccumulator{acc} // save the accumulator in case we need to restart the plugin
-	m.Mqtt_Consumer.Log = m.Log
+	m.Mqtt_Consumer.Log = levelFilterLogger{Logger: m.Log}
 	m.parser = m.Parser
 
 	if m.parser == nil {
