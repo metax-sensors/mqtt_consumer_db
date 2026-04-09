@@ -15,7 +15,7 @@ type CustomAccumulator struct {
 func (ca *CustomAccumulator) WithTracking(maxTracked int) telegraf.TrackingAccumulator {
 	return &CustomTrackingAccumulator{
 		Accumulator: ca,
-		delivered: make(chan telegraf.DeliveryInfo, maxTracked),
+		delivered:   make(chan telegraf.DeliveryInfo, maxTracked),
 	}
 }
 
@@ -33,13 +33,20 @@ func (a *CustomTrackingAccumulator) AddTrackingMetric(m telegraf.Metric) telegra
 func (a *CustomTrackingAccumulator) AddTrackingMetricGroup(group []telegraf.Metric) telegraf.TrackingID {
 	// Set Measurement-Name to the second part of the topic
 	for _, m := range group {
-		topic,ok := m.GetTag("topic")
+		topic, ok := m.GetTag("topic")
 		if ok {
 			s := strings.Split(topic, "/")
 			len_s := len(s)
 
 			if len_s > 0 {
 				m.AddTag("organization", s[0])
+
+				// Rename "value" field to the last topic segment
+				fieldName := s[len_s-1]
+				if val, ok := m.GetField("value"); ok {
+					m.RemoveField("value")
+					m.AddField(fieldName, val)
+				}
 
 				if len_s > 1 {
 					product := s[1]
@@ -50,12 +57,11 @@ func (a *CustomTrackingAccumulator) AddTrackingMetricGroup(group []telegraf.Metr
 						version = s[3]
 						product_version = product + "_" + version
 					}
-					
+
 					m.SetName(product_version)
 
 					m.AddTag("product", product)
 					m.AddTag("version", version)
-					//m.AddTag("topic", strings.Join(s, "/"))
 
 					if len_s > 2 {
 						m.AddTag("serialnumber", s[2])

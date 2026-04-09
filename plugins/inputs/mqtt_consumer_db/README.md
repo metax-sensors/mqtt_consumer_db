@@ -119,5 +119,24 @@ MQTT broker, it adjusts the topics whenever the subscriptions are updated.
 
 See [README.md][mqtt_consumer] of the mqtt_consumer plugin.
 
+For single numeric payloads you can use Telegraf's value parser instead of json_v2, for example:
+
+```toml
+[[inputs.mqtt_consumer_db]]
+  db_server = "postgres"
+  db_name = "bestmind"
+  db_username = "db_user"
+  db_password = "secret"
+
+  name_override = "lucidiot"
+  data_format = "value"
+  data_type = "float"
+
+  [inputs.mqtt_consumer_db.mqtt_consumer]
+    servers = ["ssl://vernemq:8883"]
+    topic_tag = "topic"
+    client_id = "server1_readonly"
+```
+
 
 [mqtt_consumer]: /plugins/inputs/mqtt_consumer/README.md

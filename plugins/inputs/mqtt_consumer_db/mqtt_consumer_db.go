@@ -13,6 +13,7 @@ import (
 
 	"github.com/influxdata/telegraf/plugins/inputs/mqtt_consumer"
 	"github.com/influxdata/telegraf/plugins/parsers/json_v2"
+	"github.com/influxdata/telegraf/plugins/parsers/value"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
@@ -30,23 +31,21 @@ type MQTTConsumerDB struct {
 	Username      config.Secret               `toml:"db_username"`
 	Password      config.Secret               `toml:"db_password"`
 	Mqtt_Consumer *mqtt_consumer.MQTTConsumer `toml:"mqtt_consumer"`
-	Parser        *json_v2.Parser             `toml:"json_v2"`
+	DataFormat    string                      `toml:"data_format"`
+	DataType      string                      `toml:"data_type"`
+	JSON_v2       *json_v2.Parser             `toml:"json_v2"`
 	ServerID      string                      `toml:"server_id"`
 	Debug         bool                        `toml:"debug"`
 	Log           telegraf.Logger             `toml:"-"`
 
-	parser telegraf.Parser
-	acc    telegraf.Accumulator
-}
-
-var (
+	parser        telegraf.Parser
+	acc           telegraf.Accumulator
 	wg            sync.WaitGroup
 	db_connection *pgxpool.Conn
 	db_pool       *pgxpool.Pool
-	instance      *MQTTConsumerDB
 	ctx           context.Context
 	cancel        context.CancelFunc
-)
+}
 
 /*const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -62,41 +61,35 @@ type subscribe_structure struct {
 	Topic string `json:"pattern"`
 }
 
-func debug_log(formatted_text string, args ...any) {
-	if instance != nil && instance.Debug {
+func (m *MQTTConsumerDB) debug_log(formatted_text string, args ...any) {
+	if m != nil && m.Debug {
 		msg := fmt.Sprintf(formatted_text, args...)
-		if instance.Log != nil {
-			instance.Log.Debugf("[mqtt_consumer_db] %s", msg)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "[mqtt_consumer_db] %s\n", msg)
+		prefix := fmt.Sprintf("[mqtt_consumer_db:%s]", m.ServerID)
+		fmt.Fprintf(os.Stderr, "%s %s\n", prefix, msg)
 	}
 }
 
-func error_log(formatted_text string, args ...any) {
+func (m *MQTTConsumerDB) error_log(formatted_text string, args ...any) {
 	msg := fmt.Sprintf(formatted_text, args...)
-	if instance != nil && instance.Log != nil {
-		instance.Log.Errorf("[mqtt_consumer_db] %s", msg)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[mqtt_consumer_db] %s\n", msg)
+	prefix := fmt.Sprintf("[mqtt_consumer_db:%s]", m.ServerID)
+	fmt.Fprintf(os.Stderr, "%s %s\n", prefix, msg)
 }
 
 // create_topics retrieves the subscribe ACL (Access Control List) for a given client ID from the database
 // and returns a list of topics that the client is allowed to subscribe to or an error if the database query
 // or unmarshaling fails.
-func create_topics(client_id string) ([]string, error) {
-	if db_connection == nil {
+func (m *MQTTConsumerDB) create_topics(client_id string) ([]string, error) {
+	if m.db_connection == nil {
 		return nil, errors.New("db connection is nil")
 	}
 
 	query := fmt.Sprintf("SELECT subscribe_acl FROM vmq_auth_acl WHERE client_id='%s';", client_id)
-	debug_log("create_topics for client_id=%q", client_id)
+	m.debug_log("create_topics for client_id=%q", client_id)
 
 	var subscribe_acl string
-	err := db_connection.QueryRow(context.Background(), query).Scan(&subscribe_acl)
+	err := m.db_connection.QueryRow(context.Background(), query).Scan(&subscribe_acl)
 	if err != nil {
-		error_log("create_topics query failed for client_id=%q: %v", client_id, err)
+		m.error_log("create_topics query failed for client_id=%q: %v", client_id, err)
 		return nil, fmt.Errorf("QueryRow failed: %w", err)
 	}
 
@@ -108,81 +101,81 @@ func create_topics(client_id string) ([]string, error) {
 		result = append(result, topic.Topic)
 	}
 
-	debug_log("Topics: %v", result)
+	m.debug_log("Topics: %v", result)
 
 	return result, nil
 }
 
 // listen to a PostgreSQL notification channel and updates the topics
 // for the MQTT consumer when a notification is received.
-func listen() {
+func (m *MQTTConsumerDB) listen() {
 	defer func() {
 		if r := recover(); r != nil {
-			error_log("panic in listen: %v\n%s", r, debug.Stack())
+			m.error_log("panic in listen: %v\n%s", r, debug.Stack())
 		}
 	}()
-	defer wg.Done()
+	defer m.wg.Done()
 
-	ctx, cancel = context.WithCancel(context.Background())
-	debug_log("listener started")
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.debug_log("listener started")
 
-	if db_pool == nil {
-		error_log("db pool is nil in listen")
+	if m.db_pool == nil {
+		m.error_log("db pool is nil in listen")
 		return
 	}
 
 	// Listen to the channel with its own connection
-	conn, err := db_pool.Acquire(context.Background())
+	conn, err := m.db_pool.Acquire(context.Background())
 	if err != nil {
-		error_log("error acquiring listener connection: %v", err)
+		m.error_log("error acquiring listener connection: %v", err)
 		return
 	}
 
 	_, err = conn.Exec(context.Background(), "LISTEN mqtt_topics_changed;")
 	if err != nil {
-		error_log("error listening to channel mqtt_topics_changed: %v", err)
+		m.error_log("error listening to channel mqtt_topics_changed: %v", err)
 		return
 	}
-	debug_log("LISTEN mqtt_topics_changed active")
+	m.debug_log("LISTEN mqtt_topics_changed active")
 
 	defer conn.Release()
 
 	for {
-		notify, err := conn.Conn().WaitForNotification(ctx)
+		notify, err := conn.Conn().WaitForNotification(m.ctx)
 		if err != nil {
-			error_log("wait for notification failed: %v", err)
+			m.error_log("wait for notification failed: %v", err)
 		}
 
 		// Check if the notification is for the current client (the server itself)
 		// and if so, update the topics
-		debug_log("Topic Update")
-		if instance == nil || instance.Mqtt_Consumer == nil {
-			error_log("instance or mqtt_consumer is nil in listener loop")
+		m.debug_log("Topic Update")
+		if m.Mqtt_Consumer == nil {
+			m.error_log("mqtt_consumer is nil in listener loop")
 			continue
 		}
 
 		if notify != nil {
-			debug_log("notification received channel=%q payload=%q", notify.Channel, notify.Payload)
+			m.debug_log("notification received channel=%q payload=%q", notify.Channel, notify.Payload)
 		}
 
-		if notify != nil && notify.Channel == "mqtt_topics_changed" && notify.Payload == instance.Mqtt_Consumer.ClientID {
-			debug_log("[listen] received notification on channel %q with payload %q", notify.Channel, notify.Payload)
+		if notify != nil && notify.Channel == "mqtt_topics_changed" && notify.Payload == m.Mqtt_Consumer.ClientID {
+			m.debug_log("[listen] received notification on channel %q with payload %q", notify.Channel, notify.Payload)
 
-			instance.Mqtt_Consumer.Topics, err = create_topics(instance.Mqtt_Consumer.ClientID)
+			m.Mqtt_Consumer.Topics, err = m.create_topics(m.Mqtt_Consumer.ClientID)
 			if err != nil {
-				error_log("[listen] error creating topics: %v", err)
+				m.error_log("[listen] error creating topics: %v", err)
 			} else {
-				debug_log("[listen] restarting mqtt consumer with %d topics", len(instance.Mqtt_Consumer.Topics))
-				instance.Mqtt_Consumer.Stop()
-				if err := instance.Mqtt_Consumer.Start(instance.acc); err != nil {
-					error_log("[listen] restart failed: %v", err)
+				m.debug_log("[listen] restarting mqtt consumer with %d topics", len(m.Mqtt_Consumer.Topics))
+				m.Mqtt_Consumer.Stop()
+				if err := m.Mqtt_Consumer.Start(m.acc); err != nil {
+					m.error_log("[listen] restart failed: %v", err)
 				}
 			}
 		}
 
 		select {
-		case <-ctx.Done():
-			debug_log("context done. Close Listener.")
+		case <-m.ctx.Done():
+			m.debug_log("context done. Close Listener.")
 			conn.Conn().Close(context.Background())
 			return
 		default:
@@ -218,8 +211,7 @@ func (m *MQTTConsumerDB) Description() string {
 }
 
 func (m *MQTTConsumerDB) Init() error {
-	instance = m
-	debug_log("init mqtt_consumer_db")
+	m.debug_log("init mqtt_consumer_db (server_id=%q, data_format=%q, data_type=%q)", m.ServerID, m.DataFormat, m.DataType)
 
 	// Build the connection string
 	var username, password string
@@ -242,13 +234,13 @@ func (m *MQTTConsumerDB) Init() error {
 
 	// Create database connection pool
 	url := fmt.Sprintf("postgresql://%s:%s@%s/%s", username, password, m.Server, m.Database)
-	debug_log("connecting to postgres server=%q database=%q", m.Server, m.Database)
+	m.debug_log("connecting to postgres server=%q database=%q", m.Server, m.Database)
 	conn, err := pgxpool.New(context.Background(), url)
 	if err != nil {
-		error_log("unable to connect to database: %v", err)
+		m.error_log("unable to connect to database: %v", err)
 		return fmt.Errorf("Unable to connect to database: %w", err)
 	}
-	db_pool = conn
+	m.db_pool = conn
 
 	// recreate instances
 	if m.Mqtt_Consumer == nil {
@@ -256,22 +248,46 @@ func (m *MQTTConsumerDB) Init() error {
 		if err != nil {
 			return fmt.Errorf("initializing embedded mqtt_consumer failed: %w", err)
 		}
-		m.Parser = &json_v2.Parser{}
 	}
 
-	// Initialize mqtt_consumer and parser
-	err = m.Parser.Init()
-	if err != nil {
-		error_log("initializing parser failed: %v", err)
-		return fmt.Errorf("initializing parser failed: %w", err)
+	// Initialize parser based on data_format
+	m.debug_log("selecting parser for data_format=%q", m.DataFormat)
+	switch m.DataFormat {
+	case "json_v2":
+		if m.JSON_v2 == nil {
+			m.JSON_v2 = &json_v2.Parser{}
+		}
+		if err := m.JSON_v2.Init(); err != nil {
+			m.error_log("initializing json_v2 parser failed: %v", err)
+			return fmt.Errorf("initializing json_v2 parser failed: %w", err)
+		}
+		m.parser = m.JSON_v2
+		m.debug_log("using json_v2 parser")
+	default:
+		dataType := m.DataType
+		if dataType == "" {
+			dataType = "float"
+		}
+		p := &value.Parser{
+			MetricName: "mqtt_consumer_db",
+			DataType:   dataType,
+		}
+		if err := p.Init(); err != nil {
+			m.error_log("initializing value parser failed: %v", err)
+			return fmt.Errorf("initializing value parser failed: %w", err)
+		}
+		m.parser = p
+		m.debug_log("using value parser with data_type=%q", dataType)
 	}
+
+	m.debug_log("parser type: %T", m.parser)
 
 	err = m.Mqtt_Consumer.Init()
 	if err != nil {
-		error_log("initializing mqtt_consumer plugin failed: %v", err)
+		m.error_log("initializing mqtt_consumer plugin failed: %v", err)
 		return fmt.Errorf("initializing mqtt_consumer plugin failed: %w", err)
 	}
-	debug_log("init complete")
+	m.debug_log("init complete")
 
 	return nil
 }
@@ -280,97 +296,93 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) (startErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			startErr = fmt.Errorf("panic in Start: %v", r)
-			error_log("%v\n%s", startErr, debug.Stack())
+			m.error_log("%v\n%s", startErr, debug.Stack())
 		}
 	}()
 
-	debug_log("start called")
+	m.debug_log("start called (parser=%T)", m.parser)
 	if m.Mqtt_Consumer == nil {
-		error_log("mqtt_consumer not configured")
+		m.error_log("mqtt_consumer not configured")
 		return errors.New("mqtt_consumer not configured")
 	}
 
-	if m.Parser == nil {
-		error_log("json_v2 parser not configured")
-		return errors.New("json_v2 parser not configured")
+	if m.parser == nil {
+		m.error_log("parser not configured")
+		return errors.New("parser not configured")
 	}
-	if db_pool == nil {
-		error_log("db pool is nil in Start")
+	if m.db_pool == nil {
+		m.error_log("db pool is nil in Start")
 		return errors.New("db pool not initialized")
 	}
 
 	m.acc = &CustomAccumulator{acc} // save the accumulator in case we need to restart the plugin
 	m.Mqtt_Consumer.Log = levelFilterLogger{Logger: m.Log}
-	m.parser = m.Parser
 
-	if m.parser == nil {
-		return errors.New("parser not set")
-	}
 	m.Mqtt_Consumer.SetParser(m.parser) // set the parser in the mqtt_consumer plugin
 	// important, because the mqtt_consumer plugin
 	// won't work without a parser
+	m.debug_log("mqtt_consumer client_id=%q servers=%v", m.Mqtt_Consumer.ClientID, m.Mqtt_Consumer.Servers)
 
 	// Acquire a connection from the pool to create the topics
-	pool_conn, err := db_pool.Acquire(context.Background())
+	pool_conn, err := m.db_pool.Acquire(context.Background())
 	if err != nil {
-		error_log("unable to acquire connection: %v", err)
+		m.error_log("unable to acquire connection: %v", err)
 		return fmt.Errorf("Unable to acquire connection: %w", err)
 	}
-	db_connection = pool_conn
+	m.db_connection = pool_conn
 
-	m.Mqtt_Consumer.Topics, err = create_topics(m.Mqtt_Consumer.ClientID)
+	m.Mqtt_Consumer.Topics, err = m.create_topics(m.Mqtt_Consumer.ClientID)
 
 	if err != nil {
-		error_log("error creating topics: %v", err)
+		m.error_log("error creating topics: %v", err)
 		return fmt.Errorf("Error creating topics: %w", err)
 	}
-	debug_log("loaded %d topics for client_id=%q", len(m.Mqtt_Consumer.Topics), m.Mqtt_Consumer.ClientID)
+	m.debug_log("loaded %d topics for client_id=%q", len(m.Mqtt_Consumer.Topics), m.Mqtt_Consumer.ClientID)
 
 	// Start the listener
-	wg.Add(1)
-	go listen()
+	m.wg.Add(1)
+	go m.listen()
 
 	// Start the MQTT consumer
-	if err := m.Mqtt_Consumer.Start(instance.acc); err != nil {
-		error_log("mqtt_consumer start failed: %v", err)
+	if err := m.Mqtt_Consumer.Start(m.acc); err != nil {
+		m.error_log("mqtt_consumer start failed: %v", err)
 		return err
 	}
-	debug_log("mqtt_consumer started")
+	m.debug_log("mqtt_consumer started")
 	return nil
 }
 
 func (m *MQTTConsumerDB) Stop() {
 	defer func() {
 		if r := recover(); r != nil {
-			error_log("panic in Stop: %v\n%s", r, debug.Stack())
+			m.error_log("panic in Stop: %v\n%s", r, debug.Stack())
 		}
 	}()
 
-	debug_log("stop called")
+	m.debug_log("stop called")
 	if m.Mqtt_Consumer != nil {
 		m.Mqtt_Consumer.Stop()
 	}
 	// Stop the listener
-	if cancel != nil {
-		cancel()
+	if m.cancel != nil {
+		m.cancel()
 	}
-	if db_connection != nil {
-		//defer db_connection.Close(context.Background())
-		db_connection.Release()
-		db_connection = nil
+	if m.db_connection != nil {
+		m.db_connection.Release()
+		m.db_connection = nil
 	}
-	if db_pool != nil {
-		db_pool.Close()
-		db_pool = nil
+	if m.db_pool != nil {
+		m.db_pool.Close()
+		m.db_pool = nil
 	}
-	debug_log("stop complete")
+	m.debug_log("stop complete")
 }
 
 func (m *MQTTConsumerDB) Gather(acc telegraf.Accumulator) (gatherErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			gatherErr = fmt.Errorf("panic in Gather: %v", r)
-			error_log("%v\n%s", gatherErr, debug.Stack())
+			m.error_log("%v\n%s", gatherErr, debug.Stack())
 		}
 	}()
 
@@ -393,7 +405,6 @@ func New() *MQTTConsumerDB {
 
 	return &MQTTConsumerDB{
 		Mqtt_Consumer: consumer,
-		Parser:        &json_v2.Parser{},
 	}
 }
 
