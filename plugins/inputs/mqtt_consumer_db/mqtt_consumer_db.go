@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/influxdata/telegraf/plugins/inputs/mqtt_consumer"
 	"github.com/influxdata/telegraf/plugins/parsers/json_v2"
@@ -140,7 +141,9 @@ func (m *MQTTConsumerDB) listen() {
 
 	defer conn.Release()
 
+	m.debug_log("entering listen loop, waiting for pg notifications...")
 	for {
+		m.debug_log("WaitForNotification blocking at %v", time.Now().UTC().Format(time.RFC3339))
 		notify, err := conn.Conn().WaitForNotification(m.ctx)
 		if err != nil {
 			m.error_log("wait for notification failed: %v", err)
@@ -148,7 +151,7 @@ func (m *MQTTConsumerDB) listen() {
 
 		// Check if the notification is for the current client (the server itself)
 		// and if so, update the topics
-		m.debug_log("Topic Update")
+		m.debug_log("Topic Update received at %v", time.Now().UTC().Format(time.RFC3339))
 		if m.Mqtt_Consumer == nil {
 			m.error_log("mqtt_consumer is nil in listener loop")
 			continue
@@ -315,7 +318,7 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) (startErr error) {
 		return errors.New("db pool not initialized")
 	}
 
-	m.acc = &CustomAccumulator{acc} // save the accumulator in case we need to restart the plugin
+	m.acc = &CustomAccumulator{Accumulator: acc, Debug: m.Debug, ServerID: m.ServerID} // save the accumulator in case we need to restart the plugin
 	m.Mqtt_Consumer.Log = levelFilterLogger{Logger: m.Log}
 
 	m.Mqtt_Consumer.SetParser(m.parser) // set the parser in the mqtt_consumer plugin
