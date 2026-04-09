@@ -116,6 +116,7 @@ func (a *stdoutAccumulator) AddMetric(m telegraf.Metric) {
 	if writeErr != nil {
 		fmt.Fprintf(os.Stderr, "[stdout] write error: %v\n", writeErr)
 	}
+	m.Accept()
 }
 
 func (a *stdoutAccumulator) SetPrecision(time.Duration) {}
