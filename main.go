@@ -68,6 +68,7 @@ func (l *stderrLogger) Trace(a ...interface{})            {}
 type stdoutAccumulator struct {
 	mu         sync.Mutex
 	serializer *influxser.Serializer
+	debug      bool
 }
 
 func newStdoutAccumulator() (*stdoutAccumulator, error) {
@@ -111,7 +112,9 @@ func (a *stdoutAccumulator) AddMetric(m telegraf.Metric) {
 		fmt.Fprintf(os.Stderr, "serialization error: %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[stdout] writing metric: %s", string(b))
+	if a.debug {
+		fmt.Fprintf(os.Stderr, "[stdout] writing metric: %s", string(b))
+	}
 	_, writeErr := os.Stdout.Write(b)
 	if writeErr != nil {
 		fmt.Fprintf(os.Stderr, "[stdout] write error: %v\n", writeErr)
@@ -188,6 +191,14 @@ func main() {
 			os.Exit(1)
 		}
 		plugins = append(plugins, p)
+	}
+
+	// Enable debug on shared accumulator if any instance has debug=true
+	for _, p := range plugins {
+		if p.Debug {
+			acc.debug = true
+			break
+		}
 	}
 
 	// Start all instances
