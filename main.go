@@ -110,6 +110,7 @@ func (a *stdoutAccumulator) AddMetric(m telegraf.Metric) {
 	b, err := a.serializer.Serialize(m)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "serialization error: %v\n", err)
+		m.Accept() // must accept even on error to free tracking slot
 		return
 	}
 	if a.debug {

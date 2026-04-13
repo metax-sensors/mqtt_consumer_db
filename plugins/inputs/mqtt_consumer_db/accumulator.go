@@ -12,8 +12,9 @@ import (
 
 type CustomAccumulator struct {
 	telegraf.Accumulator
-	Debug    bool
-	ServerID string
+	Debug      bool
+	ServerID   string
+	DataFormat string
 }
 
 func (ca *CustomAccumulator) acc_debug(format string, args ...any) {
@@ -63,38 +64,37 @@ func (a *CustomTrackingAccumulator) AddTrackingMetricGroup(group []telegraf.Metr
 			if len_s > 0 {
 				m.AddTag("organization", s[0])
 
-				// Rename "value" field to the last topic segment
-				fieldName := s[len_s-1]
-				if val, ok := m.GetField("value"); ok {
-					m.RemoveField("value")
-					m.AddField(fieldName, val)
+				ca, _ := a.Accumulator.(*CustomAccumulator)
+				isValue := ca != nil && ca.DataFormat != "json_v2"
+
+				if isValue {
+					// value parser: topic = org/product/serial/domain/field
+					// Rename "value" field to the last topic segment
+					fieldName := s[len_s-1]
+					if val, ok := m.GetField("value"); ok {
+						m.RemoveField("value")
+						m.AddField(fieldName, val)
+					}
 				}
 
 				if len_s > 1 {
 					product := s[1]
 
-					version := ""
-					product_version := product
-					if len_s > 4 {
-						version = s[3]
-						product_version = product + "_" + version
-					}
-
-					m.SetName(product_version)
-
+					m.SetName(product)
 					m.AddTag("product", product)
-					m.AddTag("version", version)
 
 					if len_s > 2 {
 						m.AddTag("serialnumber", s[2])
 
-						m.AddTag("domain", s[len_s-1])
-
-						if len_s > 4 {
-							m.AddTag("root", strings.Join(s[:len_s-2], "/"))
+						if isValue && len_s > 4 {
+							// value: org/product/serial/domain/field
+							m.AddTag("domain", s[3])
 						} else if len_s > 3 {
-							m.AddTag("root", strings.Join(s[:len_s-1], "/"))
+							// json_v2: org/product/serial/domain
+							m.AddTag("domain", s[len_s-1])
 						}
+
+						m.AddTag("root", strings.Join(s[:3], "/"))
 					}
 				}
 			}
@@ -156,14 +156,10 @@ func (a *CustomTrackingAccumulator) Delivered() <-chan telegraf.DeliveryInfo {
 
 func (a *CustomTrackingAccumulator) onDelivery(info telegraf.DeliveryInfo) {
 	if ca, ok := a.Accumulator.(*CustomAccumulator); ok {
-		ca.acc_debug("onDelivery: id=%v delivered=%v", info.ID(), info.Delivered())
+		ca.acc_debug("onDelivery: id=%v delivered=%v (channel %d/%d)", info.ID(), info.Delivered(), len(a.delivered), cap(a.delivered))
 	}
-	select {
-	case a.delivered <- info:
-	default:
-		if ca, ok := a.Accumulator.(*CustomAccumulator); ok {
-			ca.acc_debug("onDelivery: channel FULL for id=%v (cap=%d)", info.ID(), cap(a.delivered))
-		}
-		panic("channel is full")
-	}
+	// Use blocking send instead of panic to avoid crashing the mqtt_consumer goroutine.
+	// The channel can fill up when Accept() is called synchronously before the
+	// mqtt_consumer has a chance to read from Delivered().
+	a.delivered <- info
 }

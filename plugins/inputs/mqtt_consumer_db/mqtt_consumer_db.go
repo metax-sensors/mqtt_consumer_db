@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ type MQTTConsumerDB struct {
 	JSON_v2       *json_v2.Parser             `toml:"json_v2"`
 	ServerID      string                      `toml:"server_id"`
 	Debug         bool                        `toml:"debug"`
+	TopicExclude  []string                    `toml:"topic_exclude"`
 	Log           telegraf.Logger             `toml:"-"`
 
 	parser        telegraf.Parser
@@ -57,6 +59,42 @@ func RandStringBytes(n int) string {
     }
     return string(b)
 }*/
+
+// matchTopic matches a topic against a pattern split by "/".
+// "*" matches exactly one segment, "**" matches zero or more segments.
+func matchTopic(pattern, topic string) bool {
+	pParts := strings.Split(pattern, "/")
+	tParts := strings.Split(topic, "/")
+	return matchSegments(pParts, tParts)
+}
+
+func matchSegments(pattern, topic []string) bool {
+	for len(pattern) > 0 {
+		p := pattern[0]
+		if p == "**" {
+			// "**" at the end matches everything remaining
+			if len(pattern) == 1 {
+				return true
+			}
+			// try matching rest of pattern at every position
+			for i := 0; i <= len(topic); i++ {
+				if matchSegments(pattern[1:], topic[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(topic) == 0 {
+			return false
+		}
+		if p != "*" && p != topic[0] {
+			return false
+		}
+		pattern = pattern[1:]
+		topic = topic[1:]
+	}
+	return len(topic) == 0
+}
 
 type subscribe_structure struct {
 	Topic string `json:"pattern"`
@@ -99,10 +137,20 @@ func (m *MQTTConsumerDB) create_topics(client_id string) ([]string, error) {
 
 	result := []string{}
 	for _, topic := range topics {
-		result = append(result, topic.Topic)
+		excluded := false
+		for _, pattern := range m.TopicExclude {
+			if matchTopic(pattern, topic.Topic) {
+				m.debug_log("excluding topic %q (matched pattern %q)", topic.Topic, pattern)
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			result = append(result, topic.Topic)
+		}
 	}
 
-	m.debug_log("Topics: %v", result)
+	m.debug_log("Topics: %v (excluded %d)", result, len(topics)-len(result))
 
 	return result, nil
 }
@@ -318,7 +366,7 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) (startErr error) {
 		return errors.New("db pool not initialized")
 	}
 
-	m.acc = &CustomAccumulator{Accumulator: acc, Debug: m.Debug, ServerID: m.ServerID} // save the accumulator in case we need to restart the plugin
+	m.acc = &CustomAccumulator{Accumulator: acc, Debug: m.Debug, ServerID: m.ServerID, DataFormat: m.DataFormat} // save the accumulator in case we need to restart the plugin
 	m.Mqtt_Consumer.Log = levelFilterLogger{Logger: m.Log}
 
 	m.Mqtt_Consumer.SetParser(m.parser) // set the parser in the mqtt_consumer plugin
