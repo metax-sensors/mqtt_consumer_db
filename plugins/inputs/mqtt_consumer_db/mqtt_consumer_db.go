@@ -74,7 +74,8 @@ type MQTTConsumerDB struct {
 	// consumerMu serializes Start/Stop of the embedded mqtt_consumer, which
 	// can be triggered by Start, Gather, Stop and the listener goroutine.
 	consumerMu       sync.Mutex
-	consumerDown     bool
+	consumerRunning  bool // a Start succeeded and no Stop followed
+	consumerDown     bool // the last Start failed and a retry is pending
 	startBackoff     time.Duration
 	nextStartAttempt time.Time
 }
@@ -299,11 +300,16 @@ func (m *MQTTConsumerDB) refreshTopics(ctx context.Context) {
 		return
 	}
 
-	m.Log.Infof("Subscription topics changed, restarting MQTT consumer with %d topics", len(topics))
-	m.Mqtt_Consumer.Stop()
+	if m.consumerRunning {
+		m.Log.Infof("Subscription topics changed, restarting MQTT consumer with %d topics", len(topics))
+		m.Mqtt_Consumer.Stop()
+		m.consumerRunning = false
+	} else {
+		m.Log.Infof("Starting MQTT consumer with %d topics", len(topics))
+	}
 	m.Mqtt_Consumer.Topics = topics
 	if err := m.startConsumerLocked(); err != nil {
-		m.error_log("restarting MQTT consumer failed, retrying in %s: %v", m.startBackoff, err)
+		m.error_log("starting MQTT consumer failed, retrying in %s: %v", m.startBackoff, err)
 	}
 }
 
@@ -469,32 +475,32 @@ func (m *MQTTConsumerDB) Start(acc telegraf.Accumulator) (startErr error) {
 	m.debug_log("mqtt_consumer client_id=%q servers=%v", m.Mqtt_Consumer.ClientID, m.Mqtt_Consumer.Servers)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 
-	// Without the initial topic list there is nothing to subscribe to, so a
-	// database failure at this point is a startup error.
+	// Without the topic list there is nothing to subscribe to. A database that
+	// is not reachable yet is not fatal either: the listener reconnects with
+	// backoff and resynchronizes the topics, which starts the consumer.
 	topics, err := m.fetchTopics(ctx)
 	if err != nil {
-		cancel()
-		m.error_log("error creating topics: %v", err)
-		return fmt.Errorf("loading subscription topics: %w", err)
-	}
-	m.Mqtt_Consumer.Topics = topics
-	m.debug_log("loaded %d topics for client_id=%q", len(topics), m.Mqtt_Consumer.ClientID)
+		m.error_log("loading subscription topics failed, starting MQTT consumer once the database is reachable: %v", err)
+	} else {
+		m.Mqtt_Consumer.Topics = topics
+		m.debug_log("loaded %d topics for client_id=%q", len(topics), m.Mqtt_Consumer.ClientID)
 
-	// Start the listener
-	m.cancel = cancel
+		// Start the MQTT consumer before the listener runs, so the two cannot
+		// start it twice. A broker that is not reachable yet is not fatal:
+		// Gather keeps retrying with backoff.
+		m.consumerMu.Lock()
+		if err := m.startConsumerLocked(); err != nil {
+			m.error_log("mqtt_consumer start failed, retrying in %s: %v", m.startBackoff, err)
+		} else {
+			m.debug_log("mqtt_consumer started")
+		}
+		m.consumerMu.Unlock()
+	}
+
 	m.wg.Add(1)
 	go m.listen(ctx)
-
-	// Start the MQTT consumer. A broker that is not reachable yet is not
-	// fatal: Gather keeps retrying with backoff.
-	m.consumerMu.Lock()
-	defer m.consumerMu.Unlock()
-	if err := m.startConsumerLocked(); err != nil {
-		m.error_log("mqtt_consumer start failed, retrying in %s: %v", m.startBackoff, err)
-		return nil
-	}
-	m.debug_log("mqtt_consumer started")
 	return nil
 }
 
@@ -518,6 +524,7 @@ func (m *MQTTConsumerDB) Stop() {
 	if m.Mqtt_Consumer != nil {
 		m.Mqtt_Consumer.Stop()
 	}
+	m.consumerRunning = false
 	m.consumerDown = false
 	m.consumerMu.Unlock()
 
@@ -564,11 +571,13 @@ func (m *MQTTConsumerDB) Gather(acc telegraf.Accumulator) (gatherErr error) {
 // retry is needed. The caller must hold consumerMu.
 func (m *MQTTConsumerDB) startConsumerLocked() error {
 	if err := m.Mqtt_Consumer.Start(m.acc); err != nil {
+		m.consumerRunning = false
 		m.consumerDown = true
 		m.startBackoff = min(max(2*m.startBackoff, retryMin), retryMax)
 		m.nextStartAttempt = time.Now().Add(m.startBackoff)
 		return err
 	}
+	m.consumerRunning = true
 	m.consumerDown = false
 	m.startBackoff = 0
 	return nil

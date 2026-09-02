@@ -248,8 +248,9 @@ func TestConsumerStartRetriesWithBackoff(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connecting to a closed port to fail")
 	}
-	if !m.consumerDown || m.startBackoff != retryMin {
-		t.Fatalf("consumerDown = %v, startBackoff = %s; want true, %s", m.consumerDown, m.startBackoff, retryMin)
+	if !m.consumerDown || m.consumerRunning || m.startBackoff != retryMin {
+		t.Fatalf("consumerDown = %v, consumerRunning = %v, startBackoff = %s; want true, false, %s",
+			m.consumerDown, m.consumerRunning, m.startBackoff, retryMin)
 	}
 
 	// Still inside the backoff window: Gather must stay quiet.
@@ -264,6 +265,41 @@ func TestConsumerStartRetriesWithBackoff(t *testing.T) {
 	}
 	if m.startBackoff != 2*retryMin {
 		t.Fatalf("startBackoff = %s, want %s", m.startBackoff, 2*retryMin)
+	}
+}
+
+// TestStartWithoutDatabaseKeepsRunning covers an instance whose database is
+// not reachable at startup. Start must succeed so the other instances in the
+// process keep running, the consumer stays unstarted until the listener has
+// loaded the topics, and Stop must tear the listener down cleanly.
+func TestStartWithoutDatabaseKeepsRunning(t *testing.T) {
+	m := decodePlugin(t, jsonConfig)
+	m.Server = "127.0.0.1:1" // closed port: fails fast
+	if err := m.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(m.Stop)
+
+	if err := m.Start(newTestAccumulator(m)); err != nil {
+		t.Fatalf("Start with unreachable database returned %v, want nil", err)
+	}
+	if m.consumerRunning || m.consumerDown {
+		t.Fatalf("consumerRunning = %v, consumerDown = %v; want false, false", m.consumerRunning, m.consumerDown)
+	}
+	if m.Mqtt_Consumer.Topics != nil {
+		t.Fatalf("Topics = %v, want none until the database is reachable", m.Mqtt_Consumer.Topics)
+	}
+	if m.cancel == nil {
+		t.Fatal("listener not started")
+	}
+
+	// Gather must not try to start a consumer that has no topics yet.
+	if err := m.Gather(m.acc); err != nil {
+		t.Fatalf("Gather returned %v", err)
+	}
+	m.Stop()
+	if m.cancel != nil || m.pool != nil {
+		t.Fatal("Stop did not release listener and pool")
 	}
 }
 

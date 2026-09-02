@@ -81,3 +81,6 @@ step and one line per forwarded metric. On startup, in this order:
 | Change the test row's `subscribe_acl`, then `NOTIFY mqtt_topics_changed, 'server1_readonly_test';` | `Subscription topics changed, restarting MQTT consumer with N topics`. |
 | Send the same NOTIFY without changing the ACL | `subscription topics unchanged` (only with `debug = true`). |
 | Restart PostgreSQL | `topic listener failed, reconnecting in ...`, later `Listening for topic changes` again. Messages keep flowing meanwhile. |
+| Stop PostgreSQL before starting the plugin, then start it | `loading subscription topics failed, starting MQTT consumer once the database is reachable`, later `Starting MQTT consumer with N topics`. |
+| Add a second `[[inputs.mqtt_consumer_db]]` with a wrong broker port | `running 2 of 2 plugin instance(s)`. The bad instance logs `mqtt_consumer start failed, retrying in ...` every 30 s, the good one keeps delivering. Errors from the broker carry the `[mqtt_consumer_db:<server_id>]` prefix. |
+| Add a second instance without `client_id` | `error initializing instance 1 (...), skipping it`, then `running 1 of 2 plugin instance(s)`. |

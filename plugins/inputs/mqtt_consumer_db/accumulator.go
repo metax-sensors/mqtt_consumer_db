@@ -23,6 +23,16 @@ func (ca *CustomAccumulator) acc_debug(format string, args ...any) {
 	}
 }
 
+// AddError tags errors from the embedded mqtt_consumer (connection lost,
+// subscription and parse failures) with the instance they belong to, so a
+// process running several instances shows which broker is affected.
+func (ca *CustomAccumulator) AddError(err error) {
+	if err == nil {
+		return
+	}
+	ca.Accumulator.AddError(fmt.Errorf("[mqtt_consumer_db:%s] %w", ca.ServerID, err))
+}
+
 func (ca *CustomAccumulator) AddMetric(m telegraf.Metric) {
 	ca.acc_debug("AddMetric: name=%q fields=%v tags=%v time=%v", m.Name(), m.Fields(), m.Tags(), m.Time().UTC())
 	ca.Accumulator.AddMetric(m)

@@ -176,7 +176,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create and init all instances
+	// Decode and init all instances. A broken config file is fatal, but an
+	// instance whose own settings fail to initialize is skipped so it cannot
+	// take the other instances down.
 	var plugins []*mqttdb.MQTTConsumerDB
 	for i, prim := range primitives {
 		p := mqttdb.New()
@@ -188,10 +190,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "instance %d: server_id=%q data_format=%q\n", i, p.ServerID, p.DataFormat)
 
 		if err := p.Init(); err != nil {
-			fmt.Fprintf(os.Stderr, "error initializing instance %d (server_id=%q): %v\n", i, p.ServerID, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "error initializing instance %d (server_id=%q), skipping it: %v\n", i, p.ServerID, err)
+			continue
 		}
 		plugins = append(plugins, p)
+	}
+	if len(plugins) == 0 {
+		fmt.Fprintln(os.Stderr, "no plugin instance could be initialized")
+		os.Exit(1)
 	}
 
 	// Enable debug on shared accumulator if any instance has debug=true
@@ -202,17 +208,35 @@ func main() {
 		}
 	}
 
-	// Start all instances
+	// Start all instances concurrently: an instance whose broker is down
+	// blocks in Start for up to its connection_timeout and must not delay the
+	// others. An instance that fails to start is skipped, not fatal.
+	var (
+		startWg sync.WaitGroup
+		startMu sync.Mutex
+		running []*mqttdb.MQTTConsumerDB
+	)
 	for i, p := range plugins {
-		if err := p.Start(acc); err != nil {
-			fmt.Fprintf(os.Stderr, "error starting instance %d (server_id=%q): %v\n", i, p.ServerID, err)
-			for j := i - 1; j >= 0; j-- {
-				plugins[j].Stop()
+		startWg.Add(1)
+		go func() {
+			defer startWg.Done()
+			if err := p.Start(acc); err != nil {
+				fmt.Fprintf(os.Stderr, "error starting instance %d (server_id=%q), skipping it: %v\n", i, p.ServerID, err)
+				p.Stop()
+				return
 			}
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "started instance %d: server_id=%q\n", i, p.ServerID)
+			fmt.Fprintf(os.Stderr, "started instance %d: server_id=%q\n", i, p.ServerID)
+			startMu.Lock()
+			running = append(running, p)
+			startMu.Unlock()
+		}()
 	}
+	startWg.Wait()
+	if len(running) == 0 {
+		fmt.Fprintln(os.Stderr, "no plugin instance could be started")
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "running %d of %d plugin instance(s)\n", len(running), len(primitives))
 
 	// Context for shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -233,24 +257,29 @@ func main() {
 		}
 	}()
 
-	// Periodic gather (if enabled)
+	// Periodic gather, one goroutine per instance. Gather is where an
+	// instance reconnects to its broker after a failure, which can block for
+	// the connection_timeout; that must not stall the other instances.
+	var gatherWg sync.WaitGroup
 	if *pollInterval > 0 {
-		go func() {
-			ticker := time.NewTicker(*pollInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					for _, p := range plugins {
+		for _, p := range running {
+			gatherWg.Add(1)
+			go func() {
+				defer gatherWg.Done()
+				ticker := time.NewTicker(*pollInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
 						if err := p.Gather(acc); err != nil {
-							fmt.Fprintf(os.Stderr, "gather error: %v\n", err)
+							fmt.Fprintf(os.Stderr, "gather error (server_id=%q): %v\n", p.ServerID, err)
 						}
+					case <-ctx.Done():
+						return
 					}
-				case <-ctx.Done():
-					return
 				}
-			}
-		}()
+			}()
+		}
 	}
 
 	// Wait for shutdown
@@ -260,10 +289,19 @@ func main() {
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "stdin closed, shutting down...")
 	}
+	cancel()
+	gatherWg.Wait()
 
-	// Stop all instances
-	for _, p := range plugins {
-		p.Stop()
+	// Stop all instances concurrently so one slow stop does not hold up the rest.
+	var stopWg sync.WaitGroup
+	for _, p := range running {
+		stopWg.Add(1)
+		go func() {
+			defer stopWg.Done()
+			p.Stop()
+			fmt.Fprintf(os.Stderr, "stopped instance server_id=%q\n", p.ServerID)
+		}()
 	}
+	stopWg.Wait()
 	fmt.Fprintln(os.Stderr, "all instances stopped")
 }
