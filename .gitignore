@@ -1,2 +1,6 @@
+# Build output
 /mqtt_consumer_db
 /mqtt_consumer_db.exe
+
+# Local test configuration with real credentials
+/test/*.local.conf
