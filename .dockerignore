@@ -1,0 +1,8 @@
+# Only go.mod/go.sum/main.go/plugins are COPY'd by the Dockerfile; this just
+# keeps large or irrelevant files from being sent to the daemon.
+.git
+.github
+*.exe
+mqtt_consumer_db
+test/
+Dockerfile

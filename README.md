@@ -1,6 +1,10 @@
 # Install Instructions
 
-Build the binary
+Build the telegraf image with the plugin included (recommended):
+
+$ docker build -t metax-sensors/mqtt_consumer_db:latest .
+
+Or build only the binary
 
 $ ./build.ps1
 
