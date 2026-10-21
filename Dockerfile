@@ -9,7 +9,7 @@
 # TELEGRAF_VERSION must match the telegraf module version in go.mod.
 
 ARG TELEGRAF_VERSION=1.39.3
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 
 # ---- build stage: compile the plugin --------------------------------------
 FROM golang:${GO_VERSION}-alpine AS build
